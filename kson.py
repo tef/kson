@@ -57,6 +57,7 @@ registry = Registry()
 class wire:
     @registry.add('Request', 'kson/v1')
     class Request:
+        """ A request to a service """
         def __init__(self, metadata, state, attributes):
             self.metadata = metadata
             self.state = state
@@ -64,10 +65,12 @@ class wire:
 
     @registry.add('Response', 'kson/v1')
     class Response:
-        def __init__(self, metadata, state, attributes):
+        """ A response from a service """
+        def __init__(self, metadata, state, attributes, content):
             self.metadata = metadata
             self.state = state
             self.attributes = attributes
+            self.content = content
 
     @registry.add('Service', 'kson/v1')
     class Service:
@@ -89,6 +92,7 @@ class wire:
             self.metadata = metadata
             self.state = state
             self.attributes = attributes
+
     @registry.add('Future', 'kson/v1')
     class Future: 
         def __init__(self, metadata, state, attributes):
@@ -133,16 +137,38 @@ class server:
                     traceback.print_exc()
             self.join(5)
 
+parse, dump = registry.parse, registry.dump
+
+def rpc(safe=False):
+    def _decorator(fn):
+        fn.rpc = True
+        return fn
+    return _decorator
+
 class Endpoint:
     def __init__(self, prefix='/', version='v1'):
         self.prefix = prefix
         self.version = version
 
     def __call__(self, environ, start_response):
-        start_response('200 Ok', [])
-        return [dump(wire.Response({},{}, {}))]
+        path = environ.get('PATH_INFO', '')
+        method = environ['REQUEST_METHOD'].lower()
+        query = environ.get('QUERY_STRING', '')
+        if method == "POST":
+            body = environ.get('wsgi.input', None)
+            content_type = environ.get('CONTENT_TYPE', '')
+            content_length = environ.get('CONTENT_LENGTH', 0)
+            start_response('200 Ok', [])
+            obj = parse(body.read())
+            return [dump(wire.Response({},{}, {}, body))]
+        else:
+            start_response('200 Ok', [])
+            return [dump(wire.Response({},{}, {},path))]
 
-parse, dump = registry.parse, registry.dump
+
+        # if get, then return index
+        # if post, then call method
+
 
 def serve(endpoint):
     return server.Server(app=endpoint, port=1729)
@@ -163,6 +189,8 @@ def fetch(url):
         pass
     elif isinstance(obj, wire.Cursor):
         pass
+    elif isinstance(obj, wire.Future):
+        pass
 
 
     else:
@@ -174,7 +202,8 @@ if __name__ == '__main__':
 
     class MyEndpoint(Endpoint):
 
-        def rpc_one(self, args):
+        @rpc()
+        def one(self, args):
             return {'args': args}
 
     thread = serve(MyEndpoint())
@@ -183,6 +212,8 @@ if __name__ == '__main__':
     url = thread.url
 
     service = fetch(url)
+
+    print(service.content)
 
     # response = fetch(service.rpc_one())
 
