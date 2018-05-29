@@ -52,90 +52,110 @@ class Registry:
                 document[k] = v
         return json.dumps(document).encode('utf-8')
 
+class ServerThread(threading.Thread):
+    class RequestHandler(WSGIRequestHandler):
+        def log_request(self, code='-', size='-'):
+            pass
+
+    def __init__(self, app, host="", port=0, request_handler=None):
+        if request_handler is None:
+            request_handler = self.RequestHandler
+        threading.Thread.__init__(self)
+        self.daemon=True
+        self.running = True
+        self.server = make_server(host, port, app,
+            handler_class=request_handler)
+
+    @property
+    def url(self):
+        return u'http://%s:%d/'%(self.server.server_name, self.server.server_port)
+
+    def run(self):
+        self.running = True
+        while self.running:
+            self.server.handle_request()
+
+    def stop(self):
+        self.running =False
+        if self.server and self.is_alive():
+            try:
+                s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                s.connect(self.server.socket.getsockname()[:2])
+                s.send(b'\r\n')
+                s.close()
+            except IOError:
+                import traceback
+                traceback.print_exc()
+        self.join(5)
+
 registry = Registry()
 
 class wire:
     @registry.add('Request', 'kson/v1')
     class Request:
         """ A request to a service """
-        def __init__(self, metadata, state, attributes):
+        def __init__(self, metadata, content):
             self.metadata = metadata
-            self.state = state
-            self.attributes = attributes
+            self.content = content
 
     @registry.add('Response', 'kson/v1')
     class Response:
         """ A response from a service """
-        def __init__(self, metadata, state, attributes, content):
+        def __init__(self, metadata, content):
             self.metadata = metadata
-            self.state = state
-            self.attributes = attributes
             self.content = content
 
     @registry.add('Service', 'kson/v1')
     class Service:
-        def __init__(self, metadata, state, attributes):
+        """ Remote service with methods
+
+            metadata:
+                url,
+                links = ['name']
+                actions ={'name':[args]}
+            attributes:
+                user-def
+        """
+        def __init__(self, metadata,  attributes):
             self.metadata = metadata
-            self.state = state
             self.attributes = attributes
 
     @registry.add('Collection', 'kson/v1')
     class Collection:
-        def __init__(self, metadata, state, attributes):
+        """
+            metadata:
+                url
+                fields = ['create', 'args']
+                keys = ['key','key2'] # which fields can index onn
+                key = "name of key" # primary key
+                
+        """
+        def __init__(self, metadata, attributes):
             self.metadata = metadata
-            self.state = state
             self.attributes = attributes
     
     @registry.add('Cursor', 'kson/v1')
     class Cursor:
-        def __init__(self, metadata, state, attributes):
+        """
+            metadata:
+                url
+                collection
+                selector
+                next
+        """
+        def __init__(self, metadata, attributes):
             self.metadata = metadata
-            self.state = state
             self.attributes = attributes
 
     @registry.add('Future', 'kson/v1')
     class Future: 
-        def __init__(self, metadata, state, attributes):
+        """
+            metadata:
+                url
+                wait_seconds
+        """
+        def __init__(self, metadata):
             self.metadata = metadata
-            self.state = state
-            self.attributes = attributes
-
-class server:
-    class RequestHandler(WSGIRequestHandler):
-        def log_request(self, code='-', size='-'):
-            pass
-
-    class Server(threading.Thread):
-        def __init__(self, app, host="", port=0, request_handler=None):
-            if request_handler is None:
-                request_handler = server.RequestHandler
-            threading.Thread.__init__(self)
-            self.daemon=True
-            self.running = True
-            self.server = make_server(host, port, app,
-                handler_class=request_handler)
-
-        @property
-        def url(self):
-            return u'http://%s:%d/'%(self.server.server_name, self.server.server_port)
-
-        def run(self):
-            self.running = True
-            while self.running:
-                self.server.handle_request()
-
-        def stop(self):
-            self.running =False
-            if self.server and self.is_alive():
-                try:
-                    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                    s.connect(self.server.socket.getsockname()[:2])
-                    s.send(b'\r\n')
-                    s.close()
-                except IOError:
-                    import traceback
-                    traceback.print_exc()
-            self.join(5)
 
 parse, dump = registry.parse, registry.dump
 
@@ -145,33 +165,89 @@ def rpc(safe=False):
         return fn
     return _decorator
 
-class Endpoint:
-    def __init__(self, prefix='/', version='v1'):
-        self.prefix = prefix
-        self.version = version
+class RetryLater(Exception):
+    def __init__(self, wait_seconds=30):
+        self.wait_seconds = wait_seconds
+        Exception.__init__(self)
 
-    def __call__(self, environ, start_response):
-        path = environ.get('PATH_INFO', '')
-        method = environ['REQUEST_METHOD'].lower()
-        query = environ.get('QUERY_STRING', '')
+class Endpoint:
+    def __init__(self):
+        pass
+
+    class Handler:
+        def __init__(self, url, obj):
+            self.url = url
+            self.obj = obj
+
+        def handle(self, method, path, query, data):
+            return wire.Request(metadata={}, content=data)
+
+        def describe(self):
+            metadata = dict(
+                url = "...",
+                links = {},
+                actions = {},
+                embeds = {},
+            )
+            return wire.Service(metadata={}, attributes={})
+            
+
+class Model:        
+    pass
+    "/id/x /list?... /new /delete"
+
+def make_app(endpoint):
+    # inspect object
+    # gather list of methods, arguments
+    # and nested models, endpoints
+    # make up Service/Collection objects
+    # annotate them with __url__
+
+    handler_class = endpoint.Handler
+
+    handler  = handler_class("/", endpoint)
+
+    def app(environ, start_response):
+        method = environ['REQUEST_METHOD'].upper()
+
         if method == "POST":
             body = environ.get('wsgi.input', None)
+            content_length = int(environ.get('CONTENT_LENGTH', 0))
             content_type = environ.get('CONTENT_TYPE', '')
-            content_length = environ.get('CONTENT_LENGTH', 0)
-            start_response('200 Ok', [])
-            obj = parse(body.read())
-            return [dump(wire.Response({},{}, {}, body))]
+            if body and content_length > 0:
+                data = parse(body.read(content_length))
         else:
+            data = None
+
+        path = environ.get('PATH_INFO', '')
+        query = environ.get('QUERY_STRING', '')
+
+        out = None
+        try:
+            out = handler.handle(method, path, query, data)
+        except Exception:
+            raise
+
+        if out is not None:
             start_response('200 Ok', [])
-            return [dump(wire.Response({},{}, {},path))]
+            return [dump(out)]
+        else:
+            start_response('204 None', [])
+            return []
 
+    return app
 
-        # if get, then return index
-        # if post, then call method
+class RemoteService:
+    def __init__(self, url, response, fetch):
+        self.url = url
+        self.response = response
+        self.fetch = fetch
 
-
-def serve(endpoint):
-    return server.Server(app=endpoint, port=1729)
+class RemoteModel:
+    def __init__(self, url, response, fetch):
+        self.url = url
+        self.response = response
+        self.fetch = fetch
 
 def fetch(url):
     if isinstance(url, str):
@@ -181,10 +257,19 @@ def fetch(url):
 
     with urllib.request.urlopen(request) as response:
         data = response.read()
+        url = response.geturl()
+        print(url)
         obj = parse(data)
 
     if isinstance(obj, wire.Response):
+        # check ok, extract content
+        obj = obj.content
         pass
+    elif isinstance(obj, wire.Service):
+        obj = RemoteService(url, obj, fetch)
+        pass
+        # build up fake object with similar methods
+
     elif isinstance(obj, wire.Collection):
         pass
     elif isinstance(obj, wire.Cursor):
@@ -206,7 +291,9 @@ if __name__ == '__main__':
         def one(self, args):
             return {'args': args}
 
-    thread = serve(MyEndpoint())
+    endpoint = MyEndpoint()
+
+    thread = ServerThread(app=make_app(endpoint), port=1729)
     thread.start()
 
     url = thread.url
@@ -215,7 +302,7 @@ if __name__ == '__main__':
 
     print(service.content)
 
-    # response = fetch(service.rpc_one())
+    # response = service.rpc_one()
 
     # print(response)
 
